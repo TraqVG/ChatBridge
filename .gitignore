@@ -1,0 +1,30 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies / builds
+node_modules/
+dist/
+build/
+coverage/
+.next/
+__pycache__/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local databases / data
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+logs/
