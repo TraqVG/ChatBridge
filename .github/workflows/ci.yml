@@ -172,7 +172,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          db_tests=(tests/*db*.test.ts tests/integration/*.test.ts)
+          db_tests=(tests/*db*.test.ts tests/integration/*.test.ts database-adapters/tests/*.test.ts)
           if [ ${#db_tests[@]} -gt 0 ]; then
             if ! node --import tsx --test --test-reporter=spec "${db_tests[@]}" > ".ci-reports/${{ github.sha }}/integration-report.txt" 2>&1; then
               cat ".ci-reports/${{ github.sha }}/integration-report.txt"
