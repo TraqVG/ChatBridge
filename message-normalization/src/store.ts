@@ -510,12 +510,10 @@ mark_receipt AS (
 
     const sql = `
 BEGIN;
-SELECT 1 FROM (
-  SELECT pg_advisory_xact_lock(
-    hashtext(${sqlTextB64(env.tenantId)}),
-    hashtext(${sqlTextB64(env.senderScopeKey)})
-  )
-) _lock WHERE FALSE;
+SELECT pg_advisory_xact_lock(
+  hashtext(${sqlTextB64(env.tenantId)}),
+  hashtext(${sqlTextB64(env.senderScopeKey)})
+);
 WITH existing_ref AS (
   SELECT msr.message_id, msr.tenant_id
   FROM message_source_refs msr
