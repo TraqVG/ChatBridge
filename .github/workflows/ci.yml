@@ -1,0 +1,188 @@
+name: ChatBridge CI
+
+on:
+  push:
+    branches:
+      - main
+      - "ci/**"
+      - "feat/**"
+      - "fix/**"
+      - "test/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatbridge-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  NODE_ENV: test
+
+jobs:
+  typecheck-lint-build-unit:
+    name: Locked Install, Typecheck, Build & Unit Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Prepare SHA report directory
+        run: mkdir -p ".ci-reports/${{ github.sha }}"
+
+      - name: Run TypeScript typecheck and lint
+        run: |
+          npm run typecheck
+          npm run lint
+
+      - name: Build TypeScript output
+        run: npm run build
+
+      - name: Run unit and smoke tests (synthetic defaults only)
+        env:
+          CHATBRIDGE_USE_SYNTHETIC_DEFAULTS: "true"
+        run: |
+          set -o pipefail
+          npm test | tee ".ci-reports/${{ github.sha }}/unit-test-output.txt"
+
+      - name: Exercise single-tick worker startup (redacted)
+        env:
+          CHATBRIDGE_USE_SYNTHETIC_DEFAULTS: "true"
+          CHATBRIDGE_WORKER_ONCE: "true"
+        run: |
+          set -o pipefail
+          npm run start:worker | tee ".ci-reports/${{ github.sha }}/worker-smoke.json"
+
+      - name: Verify zero unredacted secrets in CI reports
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(f".ci-reports/${{ github.sha }}")
+          forbidden = [
+              r"sk_live_", r"-----BEGIN", r"SYNTHETIC_BYPASS_LEAK",
+              r"postgres(?:ql)?://[^:]+:(?!ci_synthetic_pg_pass@)[^@]+@"
+          ]
+          for p in root.rglob("*"):
+              if p.is_file():
+                  txt = p.read_text(encoding="utf-8", errors="replace")
+                  for pat in forbidden:
+                      if re.search(pat, txt):
+                          print(f"Forbidden unredacted pattern {pat} in {p}", file=sys.stderr)
+                          sys.exit(1)
+          print(f"Redaction check passed for {root}")
+          PY
+
+      - name: Upload redacted unit report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatbridge-unit-reports-${{ github.sha }}
+          path: .ci-reports/${{ github.sha }}/
+          retention-days: 14
+
+  postgres-migration-and-integration:
+    name: Disposable PostgreSQL Fixtures & Integration Gate
+    runs-on: ubuntu-24.04
+    needs: typecheck-lint-build-unit
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: chatbridge_ci_owner
+          POSTGRES_PASSWORD: ci_synthetic_pg_pass
+          POSTGRES_DB: chatbridge_ci
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd="pg_isready -U chatbridge_ci_owner -d chatbridge_ci"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Prepare report folder and verify PostgreSQL fixture connectivity
+        env:
+          PGHOST: "127.0.0.1"
+          PGPORT: "5432"
+          PGUSER: "chatbridge_ci_owner"
+          PGPASSWORD: "ci_synthetic_pg_pass"
+          PGDATABASE: "chatbridge_ci"
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y postgresql-client
+          fi
+          mkdir -p ".ci-reports/${{ github.sha }}"
+          psql -v ON_ERROR_STOP=1 -c "SELECT version() AS postgres_version;" | tee ".ci-reports/${{ github.sha }}/pg-fixture-version.txt"
+
+      - name: Apply repository SQL migrations cleanly (fail fast on broken SQL)
+        env:
+          PGHOST: "127.0.0.1"
+          PGPORT: "5432"
+          PGUSER: "chatbridge_ci_owner"
+          PGPASSWORD: "ci_synthetic_pg_pass"
+          PGDATABASE: "chatbridge_ci"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sql_files=(database-adapters/migrations/*.sql migrations/*.sql)
+          if [ ${#sql_files[@]} -eq 0 ]; then
+            echo '{"migrations_applied": 0, "status": "NO_MIGRATIONS_YET_READY"}' > ".ci-reports/${{ github.sha }}/migration-report.json"
+          else
+            count=0
+            for f in "${sql_files[@]}"; do
+              echo "Applying migration: $f"
+              psql -v ON_ERROR_STOP=1 -f "$f"
+              count=$((count + 1))
+            done
+            echo "{\"migrations_applied\": $count, \"status\": \"APPLIED_OK\"}" > ".ci-reports/${{ github.sha }}/migration-report.json"
+          fi
+
+      - name: Run DB isolation or integration tests when present
+        env:
+          CHATBRIDGE_USE_SYNTHETIC_DEFAULTS: "true"
+          DATABASE_URL: "postgresql://chatbridge_ci_owner:ci_synthetic_pg_pass@127.0.0.1:5432/chatbridge_ci"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          db_tests=(tests/*db*.test.ts tests/integration/*.test.ts)
+          if [ ${#db_tests[@]} -gt 0 ]; then
+            node --import tsx --test "${db_tests[@]}" | tee ".ci-reports/${{ github.sha }}/integration-report.txt"
+          else
+            echo "No DB integration tests committed yet; disposable PostgreSQL gate ready for ID-01-04." > ".ci-reports/${{ github.sha }}/integration-report.txt"
+          fi
+
+      - name: Upload redacted PostgreSQL fixture report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatbridge-db-reports-${{ github.sha }}
+          path: .ci-reports/${{ github.sha }}/
+          retention-days: 14
