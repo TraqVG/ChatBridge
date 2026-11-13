@@ -250,6 +250,9 @@ describe("CB-03-03 PostgreSQL transactional outbox, inbox dedup, and crash/repla
       runPsql(adminEnv, `SELECT version FROM conversations WHERE id = '${convId}';`),
       "1"
     );
+
+    const completed = await store.markSucceeded(TENANT_A, eventId);
+    assert.equal(completed.state, "SUCCEEDED");
   });
 
   it("converges producer crash-after-publish and consumer crash-before-ack/replay to one SQL effect", async () => {
