@@ -71,7 +71,7 @@ function buildPgEnv(
 function runPsqlFile(pgEnv: NodeJS.ProcessEnv, filePath: string): void {
   try {
     execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-X", "-q", "-f", filePath], {
-      env: pgEnv,
+      env: { ...pgEnv, PGOPTIONS: "-c client_min_messages=warning" },
       encoding: "utf8",
     });
   } catch (err) {
