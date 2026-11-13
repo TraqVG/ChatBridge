@@ -44,6 +44,24 @@ WHERE cursor_token IS NULL;
 ALTER TABLE outbox_events
   ALTER COLUMN cursor_token SET NOT NULL;
 
+CREATE OR REPLACE FUNCTION fn_outbox_events_default_cursor()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.cursor_token IS NULL THEN
+    NEW.cursor_token := replace(encode(convert_to('cb_seq:' || NEW.outbox_seq::text, 'utf8'), 'base64'), E'\n', '');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_outbox_events_default_cursor ON outbox_events;
+CREATE TRIGGER trg_outbox_events_default_cursor
+  BEFORE INSERT ON outbox_events
+  FOR EACH ROW
+  EXECUTE FUNCTION fn_outbox_events_default_cursor();
+
 DO $$
 BEGIN
   IF NOT EXISTS (
