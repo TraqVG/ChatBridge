@@ -18,6 +18,7 @@
   "include": [
     "src/**/*.ts",
     "tests/**/*.ts",
+    "chat-core/**/*.ts",
     "channel-management/**/*.ts",
     "database-adapters/**/*.ts"
   ],
