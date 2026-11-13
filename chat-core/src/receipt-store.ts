@@ -257,8 +257,43 @@ export class PsqlReceiptStore implements ReceiptStore {
       return [];
     }
 
-    // Build one atomic PostgreSQL transaction returning one outcome JSON array on COMMIT.
-    const statements = inputs.map((input, idx) => {
+    // Deduplicate intra-batch collisions in memory so each distinct key runs in one atomic CTE statement.
+    const uniqueInputs: PersistReceiptRecordInput[] = [];
+    const slotToUniqueIdx: Array<{ readonly uniqueIdx: number; readonly intraBatchDup: boolean }> = [];
+
+    for (const input of inputs) {
+      let matchedIdx = -1;
+      for (let i = 0; i < uniqueInputs.length; i++) {
+        const u = uniqueInputs[i]!;
+        if (
+          u.tenantId === input.tenantId &&
+          u.channelAccountId === input.channelAccountId &&
+          (u.canonicalDedupKey === input.canonicalDedupKey ||
+            (input.providerEventId !== null &&
+              u.eventKind === input.eventKind &&
+              u.providerEventId === input.providerEventId) ||
+            (input.providerMessageId !== null &&
+              u.eventKind === input.eventKind &&
+              u.providerMessageId === input.providerMessageId))
+        ) {
+          matchedIdx = i;
+          break;
+        }
+      }
+      if (matchedIdx >= 0) {
+        slotToUniqueIdx.push({ uniqueIdx: matchedIdx, intraBatchDup: true });
+      } else {
+        const nextIdx = uniqueInputs.length;
+        uniqueInputs.push(input);
+        slotToUniqueIdx.push({ uniqueIdx: nextIdx, intraBatchDup: false });
+      }
+    }
+
+    // Build one pure-SQL atomic CTE query (zero TEMP tables needed under least-privilege chatbridge_app).
+    const ctes: string[] = [];
+    const unions: string[] = [];
+
+    uniqueInputs.forEach((input, idx) => {
       const evtCond =
         input.providerEventId !== null
           ? `OR (event_kind = ${sqlTextB64(input.eventKind)} AND provider_event_id = ${sqlTextB64(input.providerEventId)})`
@@ -268,8 +303,8 @@ export class PsqlReceiptStore implements ReceiptStore {
           ? `OR (event_kind = ${sqlTextB64(input.eventKind)} AND provider_message_id = ${sqlTextB64(input.providerMessageId)})`
           : "";
 
-      return `
-        WITH ins_${idx} AS (
+      ctes.push(`
+        ins_${idx} AS (
           INSERT INTO webhook_receipts (
             id, tenant_id, channel_account_id, provider, event_kind,
             scoped_provider_key, provider_event_id, provider_message_id,
@@ -321,26 +356,22 @@ export class PsqlReceiptStore implements ReceiptStore {
           ORDER BY received_at ASC, id ASC
           LIMIT 1
         )
-        INSERT INTO _cb_batch_outcomes (idx, payload)
-        SELECT ${idx}, row_to_json(r.*)
-        FROM (
-          SELECT * FROM ins_${idx}
-          UNION ALL
-          SELECT * FROM existing_${idx}
-        ) r;
-      `;
+      `);
+
+      unions.push(`
+        SELECT ${idx} AS idx, row_to_json(r.*) AS payload FROM ins_${idx} r
+        UNION ALL
+        SELECT ${idx} AS idx, row_to_json(r.*) AS payload FROM existing_${idx} r
+      `);
     });
 
     const script = `
-      BEGIN;
-      CREATE TEMP TABLE _cb_batch_outcomes (
-        idx INTEGER NOT NULL,
-        payload JSONB NOT NULL
-      ) ON COMMIT DROP;
-      ${statements.join("\n")}
+      WITH
+      ${ctes.join(",\n")}
       SELECT COALESCE(json_agg(payload ORDER BY idx ASC), '[]'::json)::text
-      FROM _cb_batch_outcomes;
-      COMMIT;
+      FROM (
+        ${unions.join("\nUNION ALL\n")}
+      ) all_rows;
     `;
 
     // Fault-injection point BEFORE sending/committing transaction to PostgreSQL.
@@ -352,8 +383,21 @@ export class PsqlReceiptStore implements ReceiptStore {
     if (!rawJson) {
       return [];
     }
-    const rows = JSON.parse(rawJson) as RawReceiptRow[];
-    return Object.freeze(rows.map(mapRawRow));
+    const uniqueOutcomes = (JSON.parse(rawJson) as RawReceiptRow[]).map(mapRawRow);
+    if (uniqueOutcomes.length !== uniqueInputs.length) {
+      throw new Error(
+        `Receipt commit verification mismatch: expected ${uniqueInputs.length}, got ${uniqueOutcomes.length}`
+      );
+    }
+
+    return Object.freeze(
+      slotToUniqueIdx.map((slot) => {
+        const outcome = uniqueOutcomes[slot.uniqueIdx]!;
+        return slot.intraBatchDup
+          ? { receipt: outcome.receipt, deduplicated: true }
+          : outcome;
+      })
+    );
   }
 }
 
