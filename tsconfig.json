@@ -18,6 +18,7 @@
   "include": [
     "src/**/*.ts",
     "tests/**/*.ts",
+    "channel-management/**/*.ts",
     "database-adapters/**/*.ts"
   ],
   "exclude": [
