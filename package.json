@@ -1,0 +1,25 @@
+{
+  "name": "chatbridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone modular multi-tenant chat backend, provider gateway coordinator, and durable queue worker scaffold",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "start": "node dist/src/server.js",
+    "start:worker": "node dist/src/worker.js",
+    "dev:server": "node --import tsx src/server.ts",
+    "dev:worker": "node --import tsx src/worker.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2"
+  }
+}
