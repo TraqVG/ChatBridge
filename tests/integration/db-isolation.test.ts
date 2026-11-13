@@ -225,7 +225,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
 
     const foreignTableSelect = runPsqlExpectFailure(
       ownerEnv,
-      "BEGIN; SET LOCAL ROLE mangmie_app; SELECT COUNT(*) FROM tenants; ROLLBACK;"
+      "BEGIN; SET LOCAL ROLE mangmie_app; SELECT COUNT(*) FROM public.tenants; ROLLBACK;"
     );
     assert.notEqual(foreignTableSelect.status, 0);
     assert.match(foreignTableSelect.stderr, /42501|permission denied/i);
