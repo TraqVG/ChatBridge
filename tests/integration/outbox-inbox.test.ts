@@ -110,13 +110,13 @@ describe("CB-03-03 PostgreSQL transactional outbox, inbox dedup, and crash/repla
     runPsql(
       adminEnv,
       `
-      INSERT INTO tenants (id, slug, name, status) VALUES
+      INSERT INTO tenants (id, slug, display_name, status) VALUES
         ('${TENANT_A}', 'outbox-tenant-a', 'Outbox Tenant A', 'ACTIVE'),
         ('${TENANT_B}', 'outbox-tenant-b', 'Outbox Tenant B', 'ACTIVE');
 
-      INSERT INTO channel_accounts (id, tenant_id, provider, external_account_id, display_name, status) VALUES
-        ('${ACC_A1}', '${TENANT_A}', 'LINE_OA', 'line-outbox-a1', 'Line Outbox A1', 'ACTIVE'),
-        ('${ACC_B1}', '${TENANT_B}', 'TIKTOK', 'tt-outbox-b1', 'TikTok Outbox B1', 'ACTIVE');
+      INSERT INTO channel_accounts (id, tenant_id, provider, external_ref, display_name, connection_status) VALUES
+        ('${ACC_A1}', '${TENANT_A}', 'LINE', 'line-outbox-a1', 'Line Outbox A1', 'CONNECTED'),
+        ('${ACC_B1}', '${TENANT_B}', 'TIKTOK', 'tt-outbox-b1', 'TikTok Outbox B1', 'CONNECTED');
 
       INSERT INTO channel_identities (id, tenant_id, channel_account_id, provider_sender_ref, scope_key, display_name) VALUES
         ('${IDENT_A1}', '${TENANT_A}', '${ACC_A1}', 'sender-a1', '${ACC_A1}:sender-a1', 'Sender A1');
