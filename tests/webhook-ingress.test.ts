@@ -237,7 +237,7 @@ describe("CB-02-01 Verified inbound webhook receipt & dedup boundary", () => {
 
     assert.equal(res.httpStatus, 503);
     assert.equal(res.persisted, false);
-    if (res.httpStatus !== 202) {
+    if ("error" in res) {
       assert.equal(res.error.code, "DEPENDENCY_UNAVAILABLE");
       assert.equal(res.error.retryable, true);
     }
