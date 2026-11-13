@@ -39,39 +39,75 @@ const SYNTHETIC_MANGMIE_LOGIN = "mm_ci_foreign_probe";
 const SYNTHETIC_PROBE_PASS = "synthetic_isolation_probe_pw_01";
 const SYNTHETIC_MANGMIE_DB = "mangmie_isolation_probe";
 
-function withUrlCredentials(
-  baseUrl: string,
-  user: string,
-  password: string,
-  database?: string
-): string {
-  const u = new URL(baseUrl);
-  u.username = user;
-  u.password = password;
-  if (database) {
-    u.pathname = `/${database}`;
+function reportCiFailure(context: string, err: unknown): never {
+  const raw = err instanceof Error ? `${err.message} | ${(err as { stderr?: unknown }).stderr ?? ""}` : String(err);
+  const singleLine = raw.replace(/[\r\n]+/g, " ").slice(0, 800);
+  if (process.env.GITHUB_ACTIONS === "true") {
+    console.log(`::error file=tests/integration/db-isolation.test.ts::${context}: ${singleLine}`);
   }
-  return u.toString();
+  throw err;
 }
 
-function runPsqlCommand(url: string, sql: string): string {
-  return execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-X", "-q", "-t", "-A", "-c", sql], {
-    encoding: "utf8",
-  }).trim();
+function buildPgEnv(
+  baseUrl: string,
+  user?: string,
+  password?: string,
+  database?: string
+): NodeJS.ProcessEnv {
+  const u = new URL(baseUrl);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PGHOST: u.hostname || "127.0.0.1",
+    PGPORT: u.port || "5432",
+    PGUSER: user ?? decodeURIComponent(u.username),
+    PGPASSWORD: password ?? decodeURIComponent(u.password),
+    PGDATABASE: database ?? u.pathname.replace(/^\//, ""),
+    PGSSLMODE: u.searchParams.get("sslmode") ?? "disable",
+  };
+  delete env.DATABASE_URL;
+  return env;
 }
 
-function runPsqlScript(url: string, sql: string): string {
-  return execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-X", "-q", "-t", "-A"], {
-    input: `${sql}\n`,
-    encoding: "utf8",
-  }).trim();
+function runPsqlFile(pgEnv: NodeJS.ProcessEnv, filePath: string): void {
+  try {
+    execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-X", "-q", "-f", filePath], {
+      env: pgEnv,
+      encoding: "utf8",
+    });
+  } catch (err) {
+    reportCiFailure(`runPsqlFile(${path.basename(filePath)})`, err);
+  }
 }
 
-function runPsqlExpectFailure(url: string, sql: string): { status: number | null; stderr: string } {
+function runPsqlCommand(pgEnv: NodeJS.ProcessEnv, sql: string): string {
+  try {
+    return execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-X", "-q", "-t", "-A", "-c", sql], {
+      env: pgEnv,
+      encoding: "utf8",
+    }).trim();
+  } catch (err) {
+    reportCiFailure(`runPsqlCommand(${sql.slice(0, 60)})`, err);
+  }
+}
+
+function runPsqlScript(pgEnv: NodeJS.ProcessEnv, sql: string): string {
+  try {
+    return execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-X", "-q", "-t", "-A"], {
+      env: pgEnv,
+      input: `${sql}\n`,
+      encoding: "utf8",
+    }).trim();
+  } catch (err) {
+    reportCiFailure(`runPsqlScript(${sql.trim().slice(0, 60)})`, err);
+  }
+}
+
+function runPsqlExpectFailure(pgEnv: NodeJS.ProcessEnv, sql: string): { status: number | null; stderr: string } {
   const res = spawnSync(
     "psql",
-    [url, "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-X", "-q"],
+    ["-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-X", "-q"],
     {
+      env: pgEnv,
       input: `${sql}\n`,
       encoding: "utf8",
     }
@@ -79,9 +115,9 @@ function runPsqlExpectFailure(url: string, sql: string): { status: number | null
   return { status: res.status, stderr: res.stderr ?? "" };
 }
 
-function cleanupTestData(url: string): void {
+function cleanupTestData(pgEnv: NodeJS.ProcessEnv): void {
   runPsqlScript(
-    url,
+    pgEnv,
     `
     DELETE FROM outbound_intents WHERE tenant_id IN ('${TENANT_A}', '${TENANT_B}');
     DELETE FROM messages WHERE tenant_id IN ('${TENANT_A}', '${TENANT_B}');
@@ -97,24 +133,27 @@ function cleanupTestData(url: string): void {
 }
 
 describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
-  let appUrl = "";
-  let foreignUrl = "";
-  let appToMangmieDbUrl = "";
+  const ownerEnv = buildPgEnv(DB_URL);
+  const appEnv = buildPgEnv(DB_URL, SYNTHETIC_APP_LOGIN, SYNTHETIC_PROBE_PASS);
+  const foreignEnv = buildPgEnv(DB_URL, SYNTHETIC_MANGMIE_LOGIN, SYNTHETIC_PROBE_PASS);
+  const appToMangmieDbEnv = buildPgEnv(
+    DB_URL,
+    SYNTHETIC_APP_LOGIN,
+    SYNTHETIC_PROBE_PASS,
+    SYNTHETIC_MANGMIE_DB
+  );
 
   before(() => {
     assert.ok(fs.existsSync(MIGRATION_PATH), `Missing migration file: ${MIGRATION_PATH}`);
 
     // Re-apply migration cleanly to verify idempotency.
-    execFileSync("psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-X", "-q", "-f", MIGRATION_PATH], {
-      encoding: "utf8",
-    });
-
-    cleanupTestData(DB_URL);
+    runPsqlFile(ownerEnv, MIGRATION_PATH);
+    cleanupTestData(ownerEnv);
 
     // Clean any leftover probe roles/databases using top-level statements outside transactions.
-    runPsqlCommand(DB_URL, `DROP DATABASE IF EXISTS ${SYNTHETIC_MANGMIE_DB};`);
+    runPsqlCommand(ownerEnv, `DROP DATABASE IF EXISTS ${SYNTHETIC_MANGMIE_DB};`);
     runPsqlScript(
-      DB_URL,
+      ownerEnv,
       `
       DROP ROLE IF EXISTS ${SYNTHETIC_APP_LOGIN};
       DROP ROLE IF EXISTS ${SYNTHETIC_MANGMIE_LOGIN};
@@ -130,34 +169,23 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
     );
 
     runPsqlCommand(
-      DB_URL,
+      ownerEnv,
       `CREATE DATABASE ${SYNTHETIC_MANGMIE_DB} OWNER ${SYNTHETIC_MANGMIE_LOGIN};`
     );
     runPsqlCommand(
-      DB_URL,
+      ownerEnv,
       `REVOKE ALL ON DATABASE ${SYNTHETIC_MANGMIE_DB} FROM PUBLIC, chatbridge_app, ${SYNTHETIC_APP_LOGIN};`
     );
 
     // Re-run migration AFTER mangmie_app exists to verify migration explicitly revokes mangmie_app grants too.
-    execFileSync("psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-X", "-q", "-f", MIGRATION_PATH], {
-      encoding: "utf8",
-    });
-
-    appUrl = withUrlCredentials(DB_URL, SYNTHETIC_APP_LOGIN, SYNTHETIC_PROBE_PASS);
-    foreignUrl = withUrlCredentials(DB_URL, SYNTHETIC_MANGMIE_LOGIN, SYNTHETIC_PROBE_PASS);
-    appToMangmieDbUrl = withUrlCredentials(
-      DB_URL,
-      SYNTHETIC_APP_LOGIN,
-      SYNTHETIC_PROBE_PASS,
-      SYNTHETIC_MANGMIE_DB
-    );
+    runPsqlFile(ownerEnv, MIGRATION_PATH);
   });
 
   after(() => {
-    cleanupTestData(DB_URL);
-    runPsqlCommand(DB_URL, `DROP DATABASE IF EXISTS ${SYNTHETIC_MANGMIE_DB};`);
+    cleanupTestData(ownerEnv);
+    runPsqlCommand(ownerEnv, `DROP DATABASE IF EXISTS ${SYNTHETIC_MANGMIE_DB};`);
     runPsqlScript(
-      DB_URL,
+      ownerEnv,
       `
       DROP ROLE IF EXISTS ${SYNTHETIC_APP_LOGIN};
       DROP ROLE IF EXISTS ${SYNTHETIC_MANGMIE_LOGIN};
@@ -168,7 +196,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
 
   it("creates non-privileged runtime and migrator roles without superuser/DDL escalation", () => {
     const row = runPsqlCommand(
-      DB_URL,
+      ownerEnv,
       `
       SELECT rolname || ':' || rolsuper || ':' || rolcreatedb || ':' || rolcreaterole || ':' || rolbypassrls
       FROM pg_roles
@@ -181,35 +209,35 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
       "chatbridge_migrator:false:false:false:false",
     ]);
 
-    const ddlFail = runPsqlExpectFailure(appUrl, "CREATE TABLE illegal_runtime_ddl (id INT);");
+    const ddlFail = runPsqlExpectFailure(appEnv, "CREATE TABLE illegal_runtime_ddl (id INT);");
     assert.notEqual(ddlFail.status, 0);
     assert.match(ddlFail.stderr, /42501|permission denied/i);
 
-    const dropFail = runPsqlExpectFailure(appUrl, "DROP TABLE tenants;");
+    const dropFail = runPsqlExpectFailure(appEnv, "DROP TABLE tenants;");
     assert.notEqual(dropFail.status, 0);
     assert.match(dropFail.stderr, /42501|must be owner/i);
   });
 
   it("blocks MangMie runtime credentials from accessing ChatBridge DB and blocks ChatBridge runtime from MangMie DB", () => {
-    const foreignConnect = runPsqlExpectFailure(foreignUrl, "SELECT COUNT(*) FROM tenants;");
+    const foreignConnect = runPsqlExpectFailure(foreignEnv, "SELECT COUNT(*) FROM tenants;");
     assert.notEqual(foreignConnect.status, 0);
     assert.match(foreignConnect.stderr, /42501|permission denied/i);
 
     const foreignTableSelect = runPsqlExpectFailure(
-      DB_URL,
+      ownerEnv,
       "BEGIN; SET LOCAL ROLE mangmie_app; SELECT COUNT(*) FROM tenants; ROLLBACK;"
     );
     assert.notEqual(foreignTableSelect.status, 0);
     assert.match(foreignTableSelect.stderr, /42501|permission denied/i);
 
-    const crossDbConnect = runPsqlExpectFailure(appToMangmieDbUrl, "SELECT 1;");
+    const crossDbConnect = runPsqlExpectFailure(appToMangmieDbEnv, "SELECT 1;");
     assert.notEqual(crossDbConnect.status, 0);
     assert.match(crossDbConnect.stderr, /42501|permission denied/i);
   });
 
   it("supports two independent tenants sharing external sender refs and idempotency keys under runtime role", () => {
     const count = runPsqlScript(
-      appUrl,
+      appEnv,
       `
       BEGIN;
       INSERT INTO tenants (id, slug, display_name) VALUES
@@ -263,7 +291,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
 
   it("rejects foreign-tenant composite FK references and policy invariant violations at DB constraint layer", () => {
     const crossTenantMsg = runPsqlExpectFailure(
-      appUrl,
+      appEnv,
       `
       INSERT INTO messages (id, tenant_id, conversation_id, seq, direction, sender_kind, body)
       VALUES ('99999999-9999-4999-8999-000000000001', '${TENANT_B}', '${CONV_A}', 2, 'IN', 'CUSTOMER', 'Forged cross-tenant');
@@ -273,7 +301,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
     assert.match(crossTenantMsg.stderr, /23503|foreign key constraint/i);
 
     const crossTenantOutbound = runPsqlExpectFailure(
-      appUrl,
+      appEnv,
       `
       INSERT INTO outbound_intents (
         id, tenant_id, conversation_id, idempotency_key, payload_hash, actor_ref, source
@@ -286,7 +314,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
     assert.match(crossTenantOutbound.stderr, /23503|foreign key constraint/i);
 
     const crossTenantWebLink = runPsqlExpectFailure(
-      appUrl,
+      appEnv,
       `
       INSERT INTO web_chat_browser_links (
         id, tenant_id, site_id, participant_id, recognition_secret_hash, issued_at, expires_at
@@ -301,7 +329,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
     assert.match(crossTenantWebLink.stderr, /23503|foreign key constraint/i);
 
     const excessiveWebTtl = runPsqlExpectFailure(
-      appUrl,
+      appEnv,
       `
       INSERT INTO web_chat_browser_links (
         id, tenant_id, site_id, participant_id, recognition_secret_hash, issued_at, expires_at
@@ -316,7 +344,7 @@ describe("ID-01-04 ChatBridge PostgreSQL tenant & ownership boundary", () => {
     assert.match(excessiveWebTtl.stderr, /23514|check constraint/i);
 
     const presignedUrlInMedia = runPsqlExpectFailure(
-      appUrl,
+      appEnv,
       `
       INSERT INTO media_assets (id, tenant_id, content_type, bytes, storage_object_key)
       VALUES (
