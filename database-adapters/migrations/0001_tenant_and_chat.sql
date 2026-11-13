@@ -17,13 +17,21 @@ BEGIN
   IF can_manage_roles THEN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chatbridge_app') THEN
       CREATE ROLE chatbridge_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-    ELSE
+    ELSIF EXISTS (
+      SELECT 1 FROM pg_roles
+       WHERE rolname = 'chatbridge_app'
+         AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+    ) THEN
       ALTER ROLE chatbridge_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chatbridge_migrator') THEN
       CREATE ROLE chatbridge_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-    ELSE
+    ELSIF EXISTS (
+      SELECT 1 FROM pg_roles
+       WHERE rolname = 'chatbridge_migrator'
+         AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+    ) THEN
       ALTER ROLE chatbridge_migrator NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
     END IF;
   END IF;
