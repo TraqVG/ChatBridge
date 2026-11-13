@@ -1,0 +1,164 @@
+name: chatbridge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CHATBRIDGE_PG_ADMIN_USER:-chatbridge_owner}
+      POSTGRES_PASSWORD: ${CHATBRIDGE_PG_ADMIN_PASSWORD:-synthetic_pg_admin_password_change_me}
+      POSTGRES_DB: ${CHATBRIDGE_PG_DB:-chatbridge_db}
+    volumes:
+      - chatbridge_pgdata:/var/lib/postgresql/data
+    networks:
+      - chatbridge_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chatbridge-app:local
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - chatbridge_net
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${CHATBRIDGE_PG_ADMIN_USER:-chatbridge_owner}
+      PGPASSWORD: ${CHATBRIDGE_PG_ADMIN_PASSWORD:-synthetic_pg_admin_password_change_me}
+      PGDATABASE: ${CHATBRIDGE_PG_DB:-chatbridge_db}
+      PGSSLMODE: disable
+      CHATBRIDGE_DB_APP_USER: ${CHATBRIDGE_DB_APP_USER:-chatbridge_runtime}
+      CHATBRIDGE_DB_APP_PASSWORD: ${CHATBRIDGE_DB_APP_PASSWORD:-synthetic_pg_app_password_change_me}
+      HOME: /tmp
+      PSQL_HISTORY: /dev/null
+    command: ["node", "dist/src/migrate.js"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chatbridge-app:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${CHATBRIDGE_HOST_PORT:-4200}:${CHATBRIDGE_PORT:-4200}"
+    networks:
+      - chatbridge_net
+    environment:
+      CHATBRIDGE_ENV: ${CHATBRIDGE_ENV:-development}
+      CHATBRIDGE_HOST: 0.0.0.0
+      CHATBRIDGE_PORT: ${CHATBRIDGE_PORT:-4200}
+      CHATBRIDGE_DATABASE_URL: postgres://${CHATBRIDGE_DB_APP_USER:-chatbridge_runtime}:${CHATBRIDGE_DB_APP_PASSWORD:-synthetic_pg_app_password_change_me}@postgres:5432/${CHATBRIDGE_PG_DB:-chatbridge_db}?sslmode=disable
+      HOME: /tmp
+      PSQL_HISTORY: /dev/null
+      CHATBRIDGE_PROBE_DATABASE: ${CHATBRIDGE_PROBE_DATABASE:-true}
+      CHATBRIDGE_INTEGRATION_HMAC_SECRET: ${CHATBRIDGE_INTEGRATION_HMAC_SECRET:-synthetic-dev-integration-hmac-secret-minimum-32-chars}
+      CHATBRIDGE_WEBHOOK_SIGNING_SECRET: ${CHATBRIDGE_WEBHOOK_SIGNING_SECRET:-synthetic-dev-webhook-signing-secret-minimum-32-chars}
+      CHATBRIDGE_OBJECT_STORAGE_ENDPOINT: ${CHATBRIDGE_OBJECT_STORAGE_ENDPOINT:-http://127.0.0.1:8333}
+      CHATBRIDGE_OBJECT_STORAGE_ACCESS_KEY_ID: ${CHATBRIDGE_OBJECT_STORAGE_ACCESS_KEY_ID:-synthetic-storage-access-key}
+      CHATBRIDGE_OBJECT_STORAGE_SECRET_ACCESS_KEY: ${CHATBRIDGE_OBJECT_STORAGE_SECRET_ACCESS_KEY:-synthetic-storage-secret-key-minimum-24}
+      CHATBRIDGE_WORKER_POLL_INTERVAL_MS: ${CHATBRIDGE_WORKER_POLL_INTERVAL_MS:-2000}
+      CHATBRIDGE_ALLOW_BLIND_SEND_RETRY: ${CHATBRIDGE_ALLOW_BLIND_SEND_RETRY:-false}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:' + (process.env.CHATBRIDGE_PORT || '4200') + '/readyz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chatbridge-app:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - chatbridge_net
+    environment:
+      CHATBRIDGE_ENV: ${CHATBRIDGE_ENV:-development}
+      CHATBRIDGE_HOST: 0.0.0.0
+      CHATBRIDGE_PORT: ${CHATBRIDGE_PORT:-4200}
+      CHATBRIDGE_DATABASE_URL: postgres://${CHATBRIDGE_DB_APP_USER:-chatbridge_runtime}:${CHATBRIDGE_DB_APP_PASSWORD:-synthetic_pg_app_password_change_me}@postgres:5432/${CHATBRIDGE_PG_DB:-chatbridge_db}?sslmode=disable
+      HOME: /tmp
+      PSQL_HISTORY: /dev/null
+      CHATBRIDGE_PROBE_DATABASE: ${CHATBRIDGE_PROBE_DATABASE:-true}
+      CHATBRIDGE_WORKER_HEARTBEAT_PATH: /tmp/chatbridge-worker-heartbeat
+      CHATBRIDGE_INTEGRATION_HMAC_SECRET: ${CHATBRIDGE_INTEGRATION_HMAC_SECRET:-synthetic-dev-integration-hmac-secret-minimum-32-chars}
+      CHATBRIDGE_WEBHOOK_SIGNING_SECRET: ${CHATBRIDGE_WEBHOOK_SIGNING_SECRET:-synthetic-dev-webhook-signing-secret-minimum-32-chars}
+      CHATBRIDGE_OBJECT_STORAGE_ENDPOINT: ${CHATBRIDGE_OBJECT_STORAGE_ENDPOINT:-http://127.0.0.1:8333}
+      CHATBRIDGE_OBJECT_STORAGE_ACCESS_KEY_ID: ${CHATBRIDGE_OBJECT_STORAGE_ACCESS_KEY_ID:-synthetic-storage-access-key}
+      CHATBRIDGE_OBJECT_STORAGE_SECRET_ACCESS_KEY: ${CHATBRIDGE_OBJECT_STORAGE_SECRET_ACCESS_KEY:-synthetic-storage-secret-key-minimum-24}
+      CHATBRIDGE_WORKER_POLL_INTERVAL_MS: ${CHATBRIDGE_WORKER_POLL_INTERVAL_MS:-2000}
+      CHATBRIDGE_ALLOW_BLIND_SEND_RETRY: ${CHATBRIDGE_ALLOW_BLIND_SEND_RETRY:-false}
+    command: ["node", "dist/src/worker.js"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const fs=require('node:fs'); const st=fs.statSync('/tmp/chatbridge-worker-heartbeat'); if(Date.now()-st.mtimeMs > 30000) process.exit(1);",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+networks:
+  chatbridge_net:
+    name: chatbridge_net
+    driver: bridge
+
+volumes:
+  chatbridge_pgdata:
+    name: chatbridge_pgdata

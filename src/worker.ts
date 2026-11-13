@@ -1,4 +1,6 @@
+import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { buildPgEnv, runPsqlStdin } from "../chat-core/src/receipt-store.js";
 import {
   loadChatBridgeConfig,
   redactChatBridgeConfig,
@@ -19,6 +21,12 @@ export interface ChatBridgeWorkerTickResult {
   readonly processedCount: number;
 }
 
+export interface ChatBridgeWorkerOptions {
+  readonly keepProcessAlive?: boolean;
+  readonly probeDatabase?: boolean;
+  readonly heartbeatPath?: string;
+}
+
 export interface ChatBridgeWorkerHandle {
   readonly config: ChatBridgeConfig;
   readonly redactedConfig: RedactedChatBridgeConfig;
@@ -33,16 +41,31 @@ export interface ChatBridgeWorkerHandle {
  * inbound receipt normalizer, outbound UNKNOWN state reconciler, and claim lease expiry).
  */
 export async function startChatBridgeWorker(
-  env: Readonly<Record<string, string | undefined>> = process.env
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  options: ChatBridgeWorkerOptions = {}
 ): Promise<ChatBridgeWorkerHandle> {
   const config = loadChatBridgeConfig(env);
   const redacted = redactChatBridgeConfig(config);
+  const probeDb = options.probeDatabase ?? env.CHATBRIDGE_PROBE_DATABASE === "true";
+  const heartbeatPath = options.heartbeatPath ?? env.CHATBRIDGE_WORKER_HEARTBEAT_PATH;
   let running = true;
   let tickCount = 0;
 
   const runTick = async (): Promise<ChatBridgeWorkerTickResult> => {
     if (!running) {
       throw new Error("ChatBridge worker is stopped");
+    }
+    let pendingCount = 0;
+    if (probeDb) {
+      const out = await runPsqlStdin(
+        buildPgEnv(config.secrets.databaseUrl),
+        "SET statement_timeout = 1500; SELECT COUNT(*)::int FROM outbox_events WHERE state IN ('PENDING', 'FAILED_RETRYABLE');"
+      );
+      const parsed = Number(out.split(/\r?\n/).find((line) => /^\d+$/.test(line.trim())) ?? "0");
+      pendingCount = Number.isFinite(parsed) ? parsed : 0;
+    }
+    if (heartbeatPath) {
+      writeFileSync(heartbeatPath, `${new Date().toISOString()}\n`, "utf8");
     }
     tickCount += 1;
     return {
@@ -54,16 +77,28 @@ export async function startChatBridgeWorker(
         "outbound_unknown_reconcile",
         "assignment_auto_release",
       ],
-      processedCount: 0,
+      processedCount: pendingCount,
     };
   };
 
   const timer = setInterval(() => {
     if (running) {
-      void runTick();
+      void runTick().catch((err: unknown) => {
+        process.stderr.write(
+          JSON.stringify({
+            level: "warn",
+            service: "chatbridge-worker",
+            event: "worker.tick_failed",
+            message: err instanceof Error ? err.message : String(err),
+            timestamp: new Date().toISOString(),
+          }) + "\n"
+        );
+      });
     }
   }, config.workerPollIntervalMs);
-  timer.unref();
+  if (!options.keepProcessAlive) {
+    timer.unref();
+  }
 
   return {
     config,
@@ -87,10 +122,29 @@ if (isMainModule) {
     process.env.CHATBRIDGE_USE_SYNTHETIC_DEFAULTS === "true"
       ? { ...SYNTHETIC_CHATBRIDGE_DEV_ENV, ...process.env }
       : process.env;
+  const runOnce = process.env.CHATBRIDGE_WORKER_ONCE === "true";
 
-  startChatBridgeWorker(effectiveEnv)
+  startChatBridgeWorker(effectiveEnv, { keepProcessAlive: !runOnce })
     .then(async (worker) => {
-      const firstTick = await worker.runTick();
+      let firstTick: ChatBridgeWorkerTickResult | null = null;
+      if (runOnce) {
+        firstTick = await worker.runTick();
+      } else {
+        try {
+          firstTick = await worker.runTick();
+        } catch (err: unknown) {
+          process.stderr.write(
+            JSON.stringify({
+              level: "warn",
+              service: "chatbridge-worker",
+              event: "worker.initial_tick_deferred",
+              message: err instanceof Error ? err.message : String(err),
+              timestamp: new Date().toISOString(),
+            }) + "\n"
+          );
+        }
+      }
+
       process.stdout.write(
         JSON.stringify({
           level: "info",
@@ -102,7 +156,7 @@ if (isMainModule) {
         }) + "\n"
       );
 
-      if (process.env.CHATBRIDGE_WORKER_ONCE === "true") {
+      if (runOnce) {
         await worker.stop();
         process.exit(0);
       }

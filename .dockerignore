@@ -1,0 +1,13 @@
+.git
+.github
+.ci-reports
+node_modules
+dist
+coverage
+.env
+.env.*
+!env.example
+*.log
+*.sqlite
+*.sqlite3
+*.db

@@ -8,6 +8,7 @@ import {
 } from "../src/config.js";
 import { startChatBridgeServer } from "../src/server.js";
 import { startChatBridgeWorker } from "../src/worker.js";
+import { runChatBridgeMigrations } from "../src/migrate.js";
 
 describe("FD-02-02 Standalone ChatBridge server and worker bootstrap", () => {
   it("loads synthetic configuration without requiring any external storefront/Auth Gate settings", () => {
@@ -154,5 +155,45 @@ describe("FD-02-02 Standalone ChatBridge server and worker bootstrap", () => {
       await worker.stop();
       assert.equal(worker.isRunning(), false);
     }
+  });
+
+  it("supports live dependency probe transitions on /readyz and fails closed on invalid migration config", async () => {
+    let dbState: "DEGRADED" | "READY" = "DEGRADED";
+    const handle = await startChatBridgeServer(
+      {
+        ...SYNTHETIC_CHATBRIDGE_DEV_ENV,
+        CHATBRIDGE_PORT: "0",
+      },
+      async () => ({
+        database: dbState,
+        outboxQueue: dbState,
+        objectStorage: "READY",
+        downstreamClients: "ABSENT",
+      })
+    );
+
+    try {
+      const first = await fetch(`${handle.baseUrl}/readyz`);
+      assert.equal(first.status, 503);
+      dbState = "READY";
+      const second = await fetch(`${handle.baseUrl}/readyz`);
+      assert.equal(second.status, 200);
+    } finally {
+      await handle.close();
+    }
+
+    await assert.rejects(
+      () => runChatBridgeMigrations({ CHATBRIDGE_DB_APP_PASSWORD: "short" }),
+      /CHATBRIDGE_DB_APP_PASSWORD is required/
+    );
+    await assert.rejects(
+      () =>
+        runChatBridgeMigrations({
+          CHATBRIDGE_MIGRATIONS_DIR: "tests/fixtures",
+          CHATBRIDGE_DB_APP_USER: "bad-role;drop",
+          CHATBRIDGE_DB_APP_PASSWORD: "synthetic_pg_app_password_change_me",
+        }),
+      /Invalid PostgreSQL role identifier/
+    );
   });
 });
