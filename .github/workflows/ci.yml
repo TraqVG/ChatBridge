@@ -174,7 +174,13 @@ jobs:
           shopt -s nullglob
           db_tests=(tests/*db*.test.ts tests/integration/*.test.ts)
           if [ ${#db_tests[@]} -gt 0 ]; then
-            node --import tsx --test "${db_tests[@]}" | tee ".ci-reports/${{ github.sha }}/integration-report.txt"
+            if ! node --import tsx --test "${db_tests[@]}" > ".ci-reports/${{ github.sha }}/integration-report.txt" 2>&1; then
+              cat ".ci-reports/${{ github.sha }}/integration-report.txt"
+              summary=$(grep -E "?|Error:|AssertionError|ERROR:|FATAL:|failing" ".ci-reports/${{ github.sha }}/integration-report.txt" | head -n 15 | tr "\r\n" " " | cut -c1-900)
+              echo "::error title=DB Integration Tests Failed::${summary}"
+              exit 1
+            fi
+            cat ".ci-reports/${{ github.sha }}/integration-report.txt"
           else
             echo "No DB integration tests committed yet; disposable PostgreSQL gate ready for ID-01-04." > ".ci-reports/${{ github.sha }}/integration-report.txt"
           fi
